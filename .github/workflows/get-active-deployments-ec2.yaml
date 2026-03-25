@@ -6,7 +6,16 @@ on:
     secrets:
       AWS_ACCOUNT_ID:
         required: true
-    inputs: {}  # AWS_REGION, MICROSERVICES, ENVIRONMENTS passed as env vars from caller
+    inputs:
+      aws_region:
+        required: true
+        type: string
+      microservices:
+        required: true
+        type: string
+      environments:
+        required: true
+        type: string
 
 jobs:
   get-active-deployments:
