@@ -46,7 +46,7 @@ jobs:
       - name: Checkout scripts repo
         uses: actions/checkout@v6
         with:
-          repository: ${{ github.repository_owner }}/scripts
+          repository: ninja-studio-public/scripts
           path: scripts
 
       - name: Configure AWS credentials (OIDC)
