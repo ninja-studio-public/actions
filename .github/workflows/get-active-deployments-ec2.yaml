@@ -16,6 +16,11 @@ on:
       environments:
         required: true
         type: string
+      oidc-role-name:
+        description: "The name of the OIDC role to assume. This must be pre-configured in AWS IAM to trust GitHub's OIDC provider."
+        required: false
+        type: string
+        default: "github-actions-role"
 
 jobs:
   get-active-deployments:
@@ -52,7 +57,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-role
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ inputs.oidc-role-name }}
           aws-region: ${{ inputs.aws_region }}
 
       - name: Set up Python
