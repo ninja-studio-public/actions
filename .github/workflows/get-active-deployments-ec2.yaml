@@ -36,6 +36,12 @@ jobs:
             exit 1
           fi
 
+      - name: Debug received inputs
+        run: |
+          echo "aws_region: '${{ inputs.aws_region }}'"
+          echo "microservices: '${{ inputs.microservices }}'"
+          echo "environments: '${{ inputs.environments }}'"          
+
       - name: Checkout scripts repo
         uses: actions/checkout@v6
         with:
