@@ -1,0 +1,168 @@
+name: Deploy to Docker Swarm with OIDC
+
+# workflow_version: 1.0.0 Dated 30 March 2026
+# Uses aws ssm send-command to deploy containers to Docker Swarm on an EC2 instance
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: "Name of service being deployed. This is also the folder name for that service"
+        required: true
+        type: string
+      deploy-environment:
+          description: "Name of environment being deployed to."
+          required: true        
+          type: string        
+      tag:
+        required: true
+        type: string
+      ec2-instance-id:
+        required: true
+        type: string
+      docker-compose-s3-bucket-name:
+        required: true
+        type: string
+      aws-region:
+        description: "AWS region to deploy. This must be the same region that holds the github credentials."
+        required: true
+        type: string  
+      git-branch:
+        description: "Git branch to deploy. This determines the compose files etc to use."
+        required: false
+        type: string
+        default: "main"
+      github-actions-role-name:
+        description: "Name of the github actions role to use for OIDC authentication"
+        required: false
+        type: string
+        default: "github-actions-role"
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy to Docker Swarm via SSM
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ inputs.github-actions-role-name }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.git-branch }}
+
+      - name: Combine and interpolate Compose files
+        run: |
+          echo "Looking for compose files to combine in the [ ${{ inputs.git-branch }} ] git branch."
+          echo "Combining compose files: base, service-specific, and optional environment override."
+          echo "The docker-compose.base.yaml file, if used, must be in the root directory."
+          echo "The docker-compose.yaml file, if used, must be in the service directory."
+          echo "The optional environment override must be named as per the pattern docker-compose.<environment>.swarm.yaml"
+          echo "The optional environment override must be placed in the service directory."
+
+          mkdir -p tmp-deploy
+          COMBINED_FILE="tmp-deploy/combined-compose.yaml"
+          BASE_FILE="docker-compose.base.yaml"
+          SERVICE_FILE="${{ inputs.service-name }}/docker-compose.yaml"
+          ENV_OVERRIDE_FILE="${{ inputs.service-name }}/docker-compose.${{ inputs.deploy-environment }}.swarm.yaml"
+
+          FILES_TO_COMBINE=()
+          LOG_USED_FILES=()
+
+          if [ -f "$BASE_FILE" ]; then
+            echo "Found base file: $BASE_FILE"
+            FILES_TO_COMBINE+=("$BASE_FILE")
+            LOG_USED_FILES+=("BASE_FILE: $BASE_FILE")
+          else
+            echo "Base file not found: $BASE_FILE — skipping"
+          fi
+
+          if [ -f "$SERVICE_FILE" ]; then
+            echo "Found service file: $SERVICE_FILE"
+            FILES_TO_COMBINE+=("$SERVICE_FILE")
+            LOG_USED_FILES+=("SERVICE_FILE: $SERVICE_FILE")
+          else
+            echo "Service file not found: $SERVICE_FILE — skipping"
+          fi
+
+          if [ -f "$ENV_OVERRIDE_FILE" ]; then
+            echo "Found environment override: $ENV_OVERRIDE_FILE"
+            FILES_TO_COMBINE+=("$ENV_OVERRIDE_FILE")
+            LOG_USED_FILES+=("ENV_OVERRIDE_FILE: $ENV_OVERRIDE_FILE")
+          else
+            echo "Environment override not found: $ENV_OVERRIDE_FILE — skipping"
+          fi
+
+          if [ ${#FILES_TO_COMBINE[@]} -eq 0 ]; then
+            echo "No compose files found to combine. Cannot proceed."
+            exit 1
+          fi
+
+          echo "Compose files used for merging:"
+          for FILE in "${LOG_USED_FILES[@]}"; do
+            echo " - $FILE"
+          done
+
+          echo "Merging files..."
+          yq ea '. as $item ireduce ({}; . * $item )' "${FILES_TO_COMBINE[@]}" > "$COMBINED_FILE"
+
+          echo "Interpolating IMAGE_TAG..."
+          sed "s|\${IMAGE_TAG}|${{ inputs.tag }}|g" "$COMBINED_FILE" > tmp-deploy/interpolated-compose.yaml
+
+      - name: Add metadata labels
+        run: |
+          yq -o y '
+            .services |= with_entries(
+              .value.labels += [
+                "meta.service.tag=${{ inputs.tag }}",
+                "meta.service.name=${{ inputs.service-name }}",
+                "meta.git.actor=${{ github.actor }}",
+                "meta.git.repository=${{ github.repository }}",
+                "meta.git.sha=${{ github.sha }}",
+                "meta.git.workflow_sha=${{ github.workflow_sha }}"
+              ]
+            )
+          ' tmp-deploy/interpolated-compose.yaml > tmp-deploy/labeled-compose.yaml
+
+      - name: Upload labeled compose yaml to S3
+        run: |
+          aws s3 cp tmp-deploy/labeled-compose.yaml s3://${{ inputs.docker-compose-s3-bucket-name }}/${{ inputs.service-name }}.yaml
+
+      - name: Prune unused Docker images and volumes
+        run: |
+          echo "Pruning unused Docker images and volumes."
+          echo "This may take some time, but the SSM commands are async, so the workflow will succeed before the command completes."        
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --comment "Prune dangling Docker images and unused volumes" \
+            --instance-ids "${{ inputs.ec2-instance-id }}" \
+            --parameters '{"commands":[
+              "sudo docker system prune -af --volumes"
+            ]}' \
+            --output json
+           
+      - name: Run remote Docker Swarm deploy via SSM
+        run: |
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploying ${{ inputs.service-name }} via Docker Swarm" \
+            --instance-ids "${{ inputs.ec2-instance-id }}" \
+            --parameters '{"commands":[
+              "aws s3 cp s3://${{ inputs.docker-compose-s3-bucket-name }}/${{ inputs.service-name }}.yaml /tmp/${{ inputs.service-name }}-compose.yaml",
+              "IMAGE_TAG=${{ inputs.tag }} sudo docker stack deploy --with-registry-auth --compose-file /tmp/${{ inputs.service-name }}-compose.yaml ${{ inputs.service-name }}"
+            ]}' \
+            --output json
+          echo "Deployment command sent to EC2 instance: ${{ inputs.ec2-instance-id }}"  
+          echo "Service ${{ inputs.service-name }} is being deployed with tag ${{ inputs.tag }}."
+          echo "The outputs of all SSM commands will be available in the AWS Systems Manager console."
+            

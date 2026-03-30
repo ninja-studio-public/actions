@@ -1,0 +1,80 @@
+name: Increment Tag Version
+
+# workflow_version: 1.0.0 Dated 30 March 2026
+# Uses christian-draeger/increment-semantic-version@1.2.3 to create a new semver tag
+
+on:
+  workflow_call:
+    outputs:
+      tag:
+        description: The new created tag name.
+        value: ${{ jobs.create-release-tag.outputs.tag }}
+      previous-tag:
+        description: The previous tag name.
+        value: ${{ jobs.detect-current-version.outputs.current-version }}
+
+jobs:
+  detect-current-version:
+    name: Detect Current Version
+    runs-on: ubuntu-latest
+    outputs:
+      current-version: ${{ steps.detect-current-version.outputs.current-version }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Fetch all tags
+        run: git fetch --tags
+
+      - name: Detect current version
+        id: detect-current-version
+        run: |
+          # Get the latest tag
+          export LATEST_TAG=$(git tag -l --sort=-v:refname | head -n 1)
+
+          # In case no tag exists, start the versioning with v1.0.0
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v1.0.0"
+          fi
+
+          echo current-version=${LATEST_TAG} >> "$GITHUB_OUTPUT"
+
+  increment-version:
+    name: Increment Version
+    runs-on: ubuntu-latest
+    needs: [detect-current-version]
+    outputs:
+      next-version: ${{ steps.next-version.outputs.next-version }}
+    steps:
+      - name: Current Version
+        run: |
+          echo Current Version: ${{ needs.detect-current-version.outputs.current-version }}
+
+      - name: Increment Version
+        id: increment-version
+        uses: christian-draeger/increment-semantic-version@1.2.3
+        with:
+          current-version: ${{ needs.detect-current-version.outputs.current-version }}
+          version-fragment: feature
+
+      - name: Append v to version
+        id: next-version
+        run: |
+          echo next-version=v${{ steps.increment-version.outputs.next-version }} >> "$GITHUB_OUTPUT"
+
+  create-release-tag:
+    name: Create Release Tag
+    runs-on: ubuntu-latest
+    needs: [increment-version]
+    outputs:
+      tag: ${{ steps.create-release-tag.outputs.tag }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Create Release Tag
+        id: create-release-tag
+        run: |
+          git tag ${{ needs.increment-version.outputs.next-version }}
+          git push origin ${{ needs.increment-version.outputs.next-version }}
+          echo tag=${{ needs.increment-version.outputs.next-version }} >> "$GITHUB_OUTPUT"
